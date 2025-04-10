@@ -316,6 +316,7 @@ func (adm AdminClient) dumpHTTP(req *http.Request, resp *http.Response) error {
 // do - execute http request.
 func (adm AdminClient) do(req *http.Request) (*http.Response, error) {
 	resp, err := adm.httpClient.Do(req)
+	fmt.Printf("do err: %v, do reps: %v\n", err, resp)
 	if err != nil {
 		// Handle this specifically for now until future Golang versions fix this issue properly.
 		if urlErr, ok := err.(*url.Error); ok {
@@ -394,12 +395,16 @@ func (adm AdminClient) executeMethod(ctx context.Context, method string, reqData
 		// Instantiate a new request.
 		var req *http.Request
 		req, err = adm.newRequest(ctx, method, reqData)
+		fmt.Printf("Error: %v\n", err)
+		fmt.Printf("Request: %v\n", req)
 		if err != nil {
 			return nil, err
 		}
 
 		// Initiate the request.
 		res, err = adm.do(req)
+		fmt.Printf("Error: %v\n", err)
+		fmt.Printf("Response: %v\n", res)
 		if err != nil {
 			// Give up right away if it is a connection refused problem
 			if errors.Is(err, syscall.ECONNREFUSED) {

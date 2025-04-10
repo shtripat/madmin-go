@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -989,16 +990,16 @@ func (adm *AdminClient) InfoAccessKey(ctx context.Context, accessKey string) (In
 	return infoResp, nil
 }
 
-// CheckObjectManagePermissionsOpts represents options for checking object manager permissions
-type CheckObjectManagePermissionsOpts struct {
+// GetObjectManagePermissionsOpts represents options for checking object manager permissions
+type GetObjectManagePermissionsOpts struct {
 	Bucket        string
 	LockEnabled   bool
 	RetentionMode string
 	LegalHold     bool
 }
 
-// CheckObjectManagePermissions checks object management permissions for the given bucket
-func (adm *AdminClient) CheckObjectManagePermissions(ctx context.Context, opts CheckObjectManagePermissionsOpts) error {
+// GetObjectManagePermissions get object management permissions details for the given bucket
+func (adm *AdminClient) GetObjectManagePermissions(ctx context.Context, opts GetObjectManagePermissionsOpts) (perms ObjectManagePermissions, err error) {
 	queryValues := url.Values{}
 	queryValues.Set("bucket", opts.Bucket)
 	if opts.LockEnabled {
@@ -1009,21 +1010,25 @@ func (adm *AdminClient) CheckObjectManagePermissions(ctx context.Context, opts C
 		queryValues.Set("legalhold", "true")
 	}
 
+	fmt.Printf("endpoint: %s\n", adminAPIPrefix+"/object-manage-permissions")
 	reqData := requestData{
-		relPath:     adminAPIPrefix + "/check-object-manage-permissions",
+		relPath:     adminAPIPrefix + "/object-manage-permissions",
 		queryValues: queryValues,
 	}
 
-	// Execute GET on /minio/admin/v3/check-object-manage-permissions
+	// Execute GET on /minio/admin/v3/object-manage-permissions
 	resp, err := adm.executeMethod(ctx, http.MethodGet, reqData)
+	fmt.Printf("CheckObjectManagePermissions err: %v\n", err)
+	fmt.Printf("CheckObjectManagePermissions resp: %v\n", resp)
 	defer closeResponse(resp)
 	if err != nil {
-		return err
+		return perms, err
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return httpRespToErrorResponse(resp)
+		return perms, httpRespToErrorResponse(resp)
 	}
 
-	return nil
+	err = json.NewDecoder(resp.Body).Decode(&perms)
+	return perms, err
 }
