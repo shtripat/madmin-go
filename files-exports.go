@@ -395,10 +395,25 @@ type FilesExport struct {
 	UsedBytes *uint64 `json:"usedBytes,omitempty"`
 }
 
-// FilesListOptions narrows ListFilesExports. An empty field does not narrow.
+// MaxFilesExportsPerPage is the most exports one page of ListFilesExports or
+// of the fleet FilesExportStats holds. The server also uses it when no limit is
+// given, and clamps a larger one to it.
+const MaxFilesExportsPerPage = 1000
+
+// FilesListOptions narrows ListFilesExports and picks its page. An empty field
+// does not narrow.
 type FilesListOptions struct {
 	Node   string
 	Status FilesExportPhase
+
+	// Limit is the most records the page covers. Zero or less leaves it to
+	// the server, which uses MaxFilesExportsPerPage.
+	Limit int
+
+	// ContinuationToken is the previous page's NextContinuationToken, and
+	// empty for the first page. It is valid only with the Node and Status it
+	// was issued with.
+	ContinuationToken string
 }
 
 // FilesExportList is the reply of ListFilesExports.
@@ -410,6 +425,11 @@ type FilesExportList struct {
 	// UnreachableNodes names the nodes that did not answer. Their exports read
 	// FilesExportUnreachable and carry no usage.
 	UnreachableNodes []FilesUnreachableNode `json:"unreachableNodes,omitempty"`
+
+	// NextContinuationToken asks for the next page. It is empty on the last
+	// page, and only its being empty ends the list: a page with a Status
+	// filter can hold fewer exports than Limit, or none, and still carry one.
+	NextContinuationToken string `json:"nextContinuationToken,omitempty"`
 }
 
 // MarshalJSON encodes a nil Exports as [], so a server that lists no export
@@ -422,11 +442,17 @@ func (l FilesExportList) MarshalJSON() ([]byte, error) {
 	return json.Marshal(list(l))
 }
 
-// FilesStatsOptions narrows the fleet form of FilesExportStats.
+// FilesStatsOptions narrows the fleet form of FilesExportStats and picks its
+// page. The per-export form takes none of them, and FilesExportStats refuses
+// each there.
 type FilesStatsOptions struct {
-	// Node, when set, reports only the exports assigned to that node. The
-	// per-export form takes no node, and FilesExportStats refuses one there.
+	// Node, when set, reports only the exports assigned to that node.
 	Node string
+
+	// Limit and ContinuationToken page the fleet form, as for
+	// FilesListOptions.
+	Limit             int
+	ContinuationToken string
 }
 
 // FilesExportCapacity is one export's capacity. It carries no throughput
@@ -452,6 +478,9 @@ type FilesStatsList struct {
 	// UnreachableNodes names the nodes that did not answer. Their exports read
 	// FilesExportUnreachable and carry no usage.
 	UnreachableNodes []FilesUnreachableNode `json:"unreachableNodes,omitempty"`
+
+	// NextContinuationToken asks for the next page, and is empty on the last.
+	NextContinuationToken string `json:"nextContinuationToken,omitempty"`
 }
 
 // MarshalJSON encodes a nil Stats as [], so a server that reports no export
@@ -468,9 +497,12 @@ func (l FilesStatsList) MarshalJSON() ([]byte, error) {
 // routed ahead of an export, so it is a reserved export name.
 const filesStatsSegment = "stats"
 
-// ListFilesExports lists every export AIStor holds, with the live status and
-// usage of each. A node that did not answer is named in
-// FilesExportList.UnreachableNodes and does not fail the call.
+// ListFilesExports returns one page of the exports AIStor holds, in export-id
+// order, with the live status and usage of each. A node that did not answer is
+// named in FilesExportList.UnreachableNodes and does not fail the call.
+//
+// To list every export, call again with FilesExportList.NextContinuationToken
+// in opts.ContinuationToken until it is empty.
 func (adm *AdminClient) ListFilesExports(ctx context.Context, opts FilesListOptions) (FilesExportList, error) {
 	values := make(url.Values)
 	if opts.Node != "" {
@@ -479,6 +511,7 @@ func (adm *AdminClient) ListFilesExports(ctx context.Context, opts FilesListOpti
 	if opts.Status != "" {
 		values.Set("status", string(opts.Status))
 	}
+	setFilesPage(values, opts.Limit, opts.ContinuationToken)
 
 	var list FilesExportList
 	err := adm.filesJSON(ctx, requestData{relPath: filesAPIPrefix + "/exports", queryValues: values}, &list)
@@ -511,16 +544,18 @@ func filesExportSegment(export string) (string, error) {
 	return url.PathEscape(export), nil
 }
 
-// FilesExportStats returns the capacity of one export, or of every export when
-// export is empty. export is a name or a numeric export id, sent as given. A
-// node that did not answer is named in FilesStatsList.UnreachableNodes and
-// does not fail the call. opts.Node narrows only the fleet form, so it is
-// refused with an export.
+// FilesExportStats returns the capacity of one export, or one page of the
+// capacity of every export when export is empty. export is a name or a numeric
+// export id, sent as given. A node that did not answer is named in
+// FilesStatsList.UnreachableNodes and does not fail the call.
+//
+// The fleet form pages as ListFilesExports does. opts applies only to it, so
+// any of its fields is refused with an export.
 func (adm *AdminClient) FilesExportStats(ctx context.Context, export string, opts FilesStatsOptions) (FilesStatsList, error) {
 	relPath := filesAPIPrefix + "/exports/" + filesStatsSegment
 	if export != "" {
-		if opts.Node != "" {
-			return FilesStatsList{}, errors.New("a node narrows only the stats of every export, not of one")
+		if opts != (FilesStatsOptions{}) {
+			return FilesStatsList{}, errors.New("a node, a limit and a continuation token apply only to the stats of every export, not of one")
 		}
 		var err error
 		if relPath, err = filesExportPath(export, "/"+filesStatsSegment); err != nil {
@@ -531,6 +566,7 @@ func (adm *AdminClient) FilesExportStats(ctx context.Context, export string, opt
 	if opts.Node != "" {
 		values.Set("node", opts.Node)
 	}
+	setFilesPage(values, opts.Limit, opts.ContinuationToken)
 
 	var stats FilesStatsList
 	err := adm.filesJSON(ctx, requestData{relPath: relPath, queryValues: values}, &stats)
@@ -870,6 +906,17 @@ func (adm *AdminClient) filesReconcileModified(export string, held func(FilesExp
 			return false, err
 		}
 		return held(cur), nil
+	}
+}
+
+// setFilesPage adds the paging parameters of a fleet read. A limit of zero or
+// less is left to the server.
+func setFilesPage(values url.Values, limit int, token string) {
+	if limit > 0 {
+		values.Set("limit", strconv.Itoa(limit))
+	}
+	if token != "" {
+		values.Set("continuation-token", token)
 	}
 }
 
